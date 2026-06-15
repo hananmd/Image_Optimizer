@@ -202,6 +202,82 @@ Reviewed the Session-2 additions for correctness and efficiency.
 - Still in-memory / no retention; verified 0 files on disk and `/quality_curve`
   now returns 404.
 
+## Session 4 — Optimization-honesty fix + 3 new features
+
+### Diagnosis: "is it actually optimizing?"
+
+Optimization *was* working for normal photos (q95 JPEG → ~60% smaller), but two
+real defects made it feel broken:
+
+1. **It could return a file LARGER than the original and still claim success.**
+   Uploading an already-compressed JPEG (q40, 64 KB) at default quality 85
+   produced an 88 KB file, yet the result panel always rendered the green
+   `savings--good` "↓ X% smaller" label — showing "↓ -36.5% smaller". The
+   template ignored the backend's `smaller` flag.
+2. **No "smallest wins" guarantee** — the re-encoded bytes were always returned.
+
+### Fixes
+
+- **Smallest-wins fallback** (`optimize_bytes` / `optimize_with_curve`): when no
+  pixel-changing transform was requested (resize 100%, no denoise, no actual
+  reorient) and the re-encode isn't smaller, the **original bytes are returned**
+  — the optimizer never hands back a larger file. `_prepare_image` now returns a
+  `transformed` flag; `_finalize()` centralizes prep + quality resolution.
+- **Honest result panel**: three states — `savings--good` (smaller),
+  `savings--none` (no change / "already optimal — original kept"),
+  `savings--bad` (larger, only possible when you resize-up or denoise).
+
+### New features
+
+1. **Auto-quality via SSIM** — `auto_select_quality()` binary-searches the
+   lowest JPEG/WebP quality whose SSIM vs the source ≥ `SSIM_TARGET` (0.92),
+   ~7 encodes. SSIM implemented in `compute_ssim()` (Wang et al., 11×11 Gaussian
+   window on OpenCV filtering). UI: "Auto quality" toggle that disables the
+   quality slider; result shows `(auto · SSIM x.xxxx)`. PNG = n/a (lossless).
+2. **Noise reduction** — `_denoise()` wraps `cv2.fastNlMeansDenoisingColored`
+   (alpha-preserving), applied in `_prepare_image` after resize. UI: "Reduce
+   noise" toggle + strength slider (1–30, default 7).
+3. **Batch ZIP with SSE** — up to 20 images / 200 MB total. Flow:
+   `POST /batch` (validate, stash job in in-memory `JOBS` with 15-min TTL) →
+   `GET /batch/stream/<id>` (Server-Sent Events: `start`/`progress`/`done`,
+   builds the ZIP in memory) → `GET /batch/download/<id>`. New "Batch (ZIP)" tab
+   with multi-file dropzone, per-file progress list, progress bar, overall
+   savings summary, and ZIP download. `app.run(threaded=True)` so the stream and
+   its download can overlap.
+
+### Backend structure changes (app.py)
+
+- `MAX_CONTENT_LENGTH` raised to ~200 MB for batch; **per-file 25 MB enforced
+  manually** in both `/upload` and `/batch` (so the single route still rejects
+  oversize files even though the global limit is higher).
+- New deps used directly: `numpy` (added to requirements), plus `cv2`.
+- `parse_options` now also reads `denoise`, `denoise_strength`, `auto_quality`.
+- Rate limits: default 60/min; `/upload` 60/min; `/batch` 20/min.
+- `cleanup_jobs()` expires stale batch jobs in `before_request`.
+
+### Front-end structure changes
+
+- `index.html`: Single/Batch **mode switcher**; shared `options_controls()`
+  Jinja macro (JS hooks are now `.js-*` **classes**, not IDs, so one wiring
+  function serves both forms); honest savings states; batch dropzone/list/
+  progress UI.
+- `upload.js`: rewritten into scoped IIFEs — `setupOptions(form, getDims)`,
+  generic `wireDropzone`, single mode, batch mode (FormData POST + `EventSource`
+  stream consumer), mode switcher, compare slider, quality curve.
+- `style.css`: `.mode-switch`/`.mode-tab`, `.savings--bad`, `.ctl--feature`,
+  `.batch-files*`, `.batch-progress*`.
+
+### Verified (Session 4)
+
+- Smallest-wins: already-small JPEG → output ≤ original, `fell_back=True`.
+- Normal JPEG: ~59–60% smaller across presets.
+- Auto-quality: returns a quality whose SSIM ≥ 0.92 (or 95 if unreachable).
+- Denoise: runs, preserves alpha.
+- Result page: normal → `savings--good`; already-small → `savings--none`
+  ("already optimal"), **no false green**; auto → `(auto · SSIM …)`.
+- Batch over **real HTTP** (curl): create → SSE start/progress×3/done → ZIP
+  download (200, correct member names).
+
 ## Possible next steps / open trade-offs
 
 - Data URIs make a 25 MB upload produce a heavy (~33 MB) HTML response. If

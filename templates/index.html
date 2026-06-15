@@ -7,11 +7,83 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
 <body>
+
+{#- Shared optimization controls, used by both the single and batch forms. -#}
+{%- macro options_controls(d) -%}
+  <div class="controls__grid">
+    <fieldset class="ctl ctl--preset">
+      <legend>Preset</legend>
+      <div class="segmented" role="radiogroup" aria-label="Speed vs quality preset">
+        {% for p in d.presets %}
+          <label class="seg">
+            <input type="radio" name="preset" value="{{ p }}" class="js-preset"
+                   {% if p == d.default_preset %}checked{% endif %} />
+            <span>{{ p.replace('_', ' ') }}</span>
+          </label>
+        {% endfor %}
+      </div>
+      <p class="ctl__hint js-preset-hint"></p>
+    </fieldset>
+
+    <div class="ctl">
+      <label for="quality">Quality <span class="ctl__val js-quality-val">{{ d.quality_default }}</span></label>
+      <input id="quality" type="range" name="quality" class="js-quality"
+             min="{{ d.quality_min }}" max="{{ d.quality_max }}" value="{{ d.quality_default }}" aria-labelledby="quality" />
+      <p class="ctl__hint">JPEG / WebP only — ignored for PNG (lossless).</p>
+    </div>
+
+    <div class="ctl">
+      <label for="resize">Resize <span class="ctl__val js-resize-val">{{ d.resize_default }}%</span></label>
+      <input id="resize" type="range" name="resize_pct" class="js-resize"
+             min="{{ d.resize_min }}" max="{{ d.resize_max }}" value="{{ d.resize_default }}" />
+      <p class="ctl__hint js-resize-hint">Aspect ratio preserved.</p>
+    </div>
+
+    <div class="ctl ctl--toggles">
+      <label class="switch">
+        <input type="checkbox" name="strip_metadata" class="js-strip" checked />
+        <span>Strip metadata</span>
+      </label>
+      <label class="switch">
+        <input type="checkbox" name="auto_orient" class="js-orient" checked />
+        <span>Auto-orient (EXIF)</span>
+      </label>
+    </div>
+
+    <div class="ctl ctl--feature">
+      <label class="switch">
+        <input type="checkbox" name="auto_quality" class="js-autoq" />
+        <span>Auto quality (target SSIM ≥ {{ d.ssim_target }})</span>
+      </label>
+      <p class="ctl__hint">Finds the lowest quality that stays visually identical, then uses it. Overrides the quality slider.</p>
+    </div>
+
+    <div class="ctl ctl--feature">
+      <label class="switch">
+        <input type="checkbox" name="denoise" class="js-denoise" />
+        <span>Reduce noise</span>
+      </label>
+      <div class="js-denoise-row" hidden>
+        <label class="ctl__sub">Strength <span class="ctl__val js-denoise-val">{{ d.denoise_default }}</span></label>
+        <input type="range" name="denoise_strength" class="js-denoise-strength"
+               min="{{ d.denoise_min }}" max="{{ d.denoise_max }}" value="{{ d.denoise_default }}" />
+        <p class="ctl__hint">Non-Local Means denoising. Higher = smoother but softer detail.</p>
+      </div>
+    </div>
+  </div>
+{%- endmacro -%}
+
   <main class="container">
     <header class="masthead">
-      <h1>Single Image Optimizer</h1>
-      <p class="subtitle">Drag &amp; drop a JPEG, PNG, or WebP, tune the options, then optimize. Max 25&nbsp;MB &middot; no retention.</p>
+      <h1>Image Optimizer</h1>
+      <p class="subtitle">JPEG, PNG &amp; WebP &middot; quality, resize, denoise &amp; auto-quality &middot; single or batch ZIP &middot; processed in memory, no retention.</p>
     </header>
+
+    <!-- Mode switcher -->
+    <div class="mode-switch" role="tablist" aria-label="Mode">
+      <button type="button" class="mode-tab is-active" data-mode="single" role="tab" aria-selected="true">Single image</button>
+      <button type="button" class="mode-tab" data-mode="batch" role="tab" aria-selected="false">Batch (ZIP)</button>
+    </div>
 
     {% with messages = get_flashed_messages() %}
       {%- if messages -%}
@@ -21,150 +93,163 @@
       {%- endif -%}
     {% endwith %}
 
-    <!-- Upload + options form -->
-    <form id="upload-form" action="{{ url_for('upload') }}" method="post"
-          enctype="multipart/form-data" {% if image %}hidden{% endif %}>
-      <div id="dropzone" class="dropzone" tabindex="0"
-           aria-label="Upload an image by dragging it here or pressing Enter to browse">
-        <input id="file-input" type="file" name="image"
-               accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden />
-        <div class="dropzone__inner">
-          <svg class="dropzone__icon" viewBox="0 0 24 24" width="48" height="48" aria-hidden="true">
-            <path fill="currentColor" d="M19 13v6H5v-6H3v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6h-2zM11 3v9.17l-2.59-2.58L7 11l5 5 5-5-1.41-1.41L13 12.17V3h-2z"/>
-          </svg>
-          <p class="dropzone__title">Drag &amp; drop your image here</p>
-          <p class="dropzone__hint">or <button type="button" id="browse-btn" class="link-btn">browse files</button></p>
-          <p class="dropzone__formats">JPEG &middot; PNG &middot; WebP &nbsp;|&nbsp; SVG &amp; GIF rejected</p>
-        </div>
-      </div>
-      <p id="client-error" class="client-error" hidden></p>
+    <!-- ===================== SINGLE MODE ===================== -->
+    <div id="mode-single" class="mode-panel{% if image %} mode-panel--result{% endif %}">
 
-      <!-- Options panel: revealed once a file is chosen -->
-      <section id="controls" class="controls" hidden>
-        <div class="controls__preview">
-          <img id="local-preview" alt="Selected image preview" />
-          <div class="controls__file">
-            <p id="local-name" class="controls__name">—</p>
-            <p id="local-meta" class="controls__metaline">—</p>
-            <button type="button" id="clear-btn" class="link-btn">Choose a different file</button>
+      <form id="upload-form" action="{{ url_for('upload') }}" method="post"
+            enctype="multipart/form-data" {% if image %}hidden{% endif %}>
+        <div id="dropzone" class="dropzone" tabindex="0"
+             aria-label="Upload an image by dragging it here or pressing Enter to browse">
+          <input id="file-input" type="file" name="image" aria-label="Choose an image file"
+                 accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden />
+          <div class="dropzone__inner">
+            <svg class="dropzone__icon" viewBox="0 0 24 24" width="48" height="48" aria-hidden="true">
+              <path fill="currentColor" d="M19 13v6H5v-6H3v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6h-2zM11 3v9.17l-2.59-2.58L7 11l5 5 5-5-1.41-1.41L13 12.17V3h-2z"/>
+            </svg>
+            <p class="dropzone__title">Drag &amp; drop your image here</p>
+            <p class="dropzone__hint">or <button type="button" id="browse-btn" class="link-btn">browse files</button></p>
+            <p class="dropzone__formats">JPEG &middot; PNG &middot; WebP &nbsp;|&nbsp; SVG &amp; GIF rejected &middot; max 25&nbsp;MB</p>
           </div>
         </div>
+        <p id="client-error" class="client-error" hidden></p>
 
-        <div class="controls__grid">
-          <fieldset class="ctl ctl--preset">
-            <legend>Preset</legend>
-            <div class="segmented" role="radiogroup" aria-label="Speed vs quality preset">
-              {% for p in defaults.presets %}
-                <label class="seg">
-                  <input type="radio" name="preset" value="{{ p }}"
-                         {% if p == defaults.default_preset %}checked{% endif %} />
-                  <span>{{ p.replace('_', ' ') }}</span>
-                </label>
-              {% endfor %}
+        <section id="controls" class="controls" hidden>
+          <div class="controls__preview">
+            <img id="local-preview" alt="Selected image preview" />
+            <div class="controls__file">
+              <p id="local-name" class="controls__name">—</p>
+              <p id="local-meta" class="controls__metaline">—</p>
+              <button type="button" id="clear-btn" class="link-btn">Choose a different file</button>
             </div>
-            <p class="ctl__hint" id="preset-hint"></p>
-          </fieldset>
-
-          <div class="ctl">
-            <label for="quality">Quality <span class="ctl__val" id="quality-val">{{ defaults.quality_default }}</span></label>
-            <input type="range" id="quality" name="quality"
-                   min="{{ defaults.quality_min }}" max="{{ defaults.quality_max }}"
-                   value="{{ defaults.quality_default }}" />
-            <p class="ctl__hint">JPEG / WebP only — ignored for PNG (lossless).</p>
           </div>
 
-          <div class="ctl">
-            <label for="resize_pct">Resize <span class="ctl__val" id="resize-val">{{ defaults.resize_default }}%</span></label>
-            <input type="range" id="resize_pct" name="resize_pct"
-                   min="{{ defaults.resize_min }}" max="{{ defaults.resize_max }}"
-                   value="{{ defaults.resize_default }}" />
-            <p class="ctl__hint" id="resize-hint">Aspect ratio preserved.</p>
-          </div>
+          {{ options_controls(defaults) }}
 
-          <div class="ctl ctl--toggles">
-            <label class="switch">
-              <input type="checkbox" id="strip_metadata" name="strip_metadata" checked />
-              <span>Strip metadata</span>
-            </label>
-            <label class="switch">
-              <input type="checkbox" id="auto_orient" name="auto_orient" checked />
-              <span>Auto-orient (EXIF)</span>
-            </label>
+          <p class="param-summary js-summary"></p>
+          <button type="submit" id="optimize-btn" class="btn-primary">Optimize image</button>
+        </section>
+      </form>
+
+      <!-- Compare slider + result -->
+      <section class="comparison" {% if not image %}hidden{% endif %} id="comparison">
+        <div class="compare">
+          <h2 class="compare__label">Drag to compare</h2>
+          <div class="compare__wrapper" id="compare-wrapper">
+            <div class="compare__layer compare__layer--before">
+              {% if image %}<img src="{{ image.before_uri }}" alt="Original image" />{% endif %}
+            </div>
+            <div class="compare__layer compare__layer--after">
+              {% if image %}<img src="{{ image.optimized.after_uri }}" alt="Optimized image" />{% endif %}
+            </div>
+            <div class="compare__handle" id="compare-handle" role="slider" aria-label="Compare before/after" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" tabindex="0">
+              <svg class="compare__icon" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6-6-6z"/></svg>
+            </div>
+          </div>
+          <div class="compare__legend">
+            <span class="compare__tag compare__tag--before">Before</span>
+            <span class="compare__tag compare__tag--after">After</span>
           </div>
         </div>
 
-        <p class="param-summary" id="param-summary"></p>
-        <button type="submit" id="optimize-btn" class="btn-primary">Optimize image</button>
+        {% if image %}
+          {% set opt = image.optimized %}
+          {% if opt.smaller %}
+            <div class="savings savings--good">↓ {{ opt.saved_pct }}% smaller
+              <span>saved {{ opt.delta_human }}</span></div>
+          {% elif opt.same %}
+            <div class="savings savings--none">No size change
+              <span>{% if opt.fell_back %}already optimal — original kept{% else %}identical size{% endif %}</span></div>
+          {% else %}
+            <div class="savings savings--bad">↑ {{ opt.abs_pct }}% larger
+              <span>+{{ opt.delta_human }} — expected when you resize up or denoise</span></div>
+          {% endif %}
+
+          <section class="quality-curve" id="quality-curve-section">
+            <h3 class="quality-curve__title">Quality vs File Size</h3>
+            <canvas id="quality-curve-chart" class="quality-curve__canvas" width="400" height="200" aria-label="Line chart showing file size at different quality levels"></canvas>
+            <p class="quality-curve__note" id="quality-curve-note">Generating chart…</p>
+          </section>
+
+          <dl class="meta"><dt>Format</dt><dd>{{ opt.format }}</dd><dt>Dimensions</dt><dd>{{ opt.width }} &times; {{ opt.height }} px</dd><dt>Size</dt><dd>{{ opt.size_human }}</dd></dl>
+          <dl class="meta meta--opts">
+            <dt>Preset</dt><dd>{{ image.options.preset.replace('_', ' ') }}</dd>
+            <dt>Quality</dt><dd>{{ image.options.effective_quality }}{% if image.options.auto_quality_used %} <span class="note">(auto · SSIM {{ image.options.ssim }})</span>{% elif image.options.quality_adjusted %} <span class="note">(adjusted by preset)</span>{% endif %}</dd>
+            <dt>Resize</dt><dd>{{ image.options.resize_pct }}%</dd>
+            <dt>Noise reduction</dt><dd>{{ ('on (strength ' ~ image.options.denoise_strength ~ ')') if image.options.denoise else 'off' }}</dd>
+            <dt>Metadata</dt><dd>{{ 'stripped' if image.options.strip_metadata else 'kept' }}</dd>
+            <dt>Auto-orient</dt><dd>{{ 'on' if image.options.auto_orient else 'off' }}</dd>
+          </dl>
+          <a class="btn-download" href="{{ opt.after_uri }}" download="{{ opt.download_name }}">Download optimized image</a>
+        {% else %}
+          <div class="panel__media panel__media--placeholder">
+            <div class="placeholder">
+              <p class="placeholder__title">Your optimized image appears here</p>
+              <p class="placeholder__text">Choose a file and adjust the options to begin.</p>
+            </div>
+          </div>
+        {% endif %}
       </section>
-    </form>
-
-    <!-- Compare slider + Quality curve chart -->
-    <section class="comparison" {% if not image %}hidden{% endif %} id="comparison">
-      <div class="compare">
-        <h2 class="compare__label">Drag to compare</h2>
-        <div class="compare__wrapper" id="compare-wrapper">
-          <div class="compare__layer compare__layer--before">
-            {% if image %}<img src="{{ image.before_uri }}" alt="Original image" />{% endif %}
-          </div>
-          <div class="compare__layer compare__layer--after">
-            {% if image %}<img src="{{ image.optimized.after_uri }}" alt="Optimized image" />{% endif %}
-          </div>
-          <div class="compare__handle" id="compare-handle" role="slider" aria-label="Compare before/after" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" tabindex="0">
-            <svg class="compare__icon" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6-6-6z"/></svg>
-          </div>
-        </div>
-        <div class="compare__legend">
-          <span class="compare__tag compare__tag--before">Before</span>
-          <span class="compare__tag compare__tag--after">After</span>
-        </div>
-      </div>
 
       {% if image %}
-        <div class="savings savings--good">↓ {{ image.optimized.saved_pct }}% smaller
-          <span>saved {{ image.optimized.saved_human }}</span></div>
+      <script type="application/json" id="curve-data">{{ {'curve': image.curve, 'format': image.format} | tojson }}</script>
+      <dl class="meta meta--before" id="before-meta">
+        <dt>Name</dt><dd>{{ image.filename }}</dd><dt>Format</dt><dd>{{ image.format }}</dd><dt>Dimensions</dt><dd>{{ image.width }} &times; {{ image.height }} px</dd><dt>Size</dt><dd>{{ image.size_human }}</dd>
+      </dl>
+      <p class="reset-row" id="reset-row"><a class="link-btn" href="{{ url_for('index') }}">Optimize another image</a></p>
+      {% endif %}
+    </div>
 
-        <section class="quality-curve" id="quality-curve-section">
-          <h3 class="quality-curve__title">Quality vs File Size</h3>
-          <canvas id="quality-curve-chart" class="quality-curve__canvas" width="400" height="200" aria-label="Line chart showing file size at different quality levels"></canvas>
-          <p class="quality-curve__note" id="quality-curve-note">Generating chart…</p>
-        </section>
-
-        <dl class="meta"><dt>Format</dt><dd>{{ image.optimized.format }}</dd><dt>Dimensions</dt><dd>{{ image.optimized.width }} &times; {{ image.optimized.height }} px</dd><dt>Size</dt><dd>{{ image.optimized.size_human }}</dd></dl>
-        <dl class="meta meta--opts">
-          <dt>Preset</dt><dd>{{ image.options.preset.replace('_', ' ') }}</dd>
-          <dt>Quality</dt><dd>{{ image.options.effective_quality }}{% if image.options.quality_adjusted %} <span class="note">(adjusted by preset)</span>{% endif %}</dd>
-          <dt>Resize</dt><dd>{{ image.options.resize_pct }}%</dd>
-          <dt>Metadata</dt><dd>{{ 'stripped' if image.options.strip_metadata else 'kept' }}</dd>
-          <dt>Auto-orient</dt><dd>{{ 'on' if image.options.auto_orient else 'off' }}</dd>
-        </dl>
-        <a class="btn-download" href="{{ image.optimized.after_uri }}"
-           download="{{ image.optimized.download_name }}">Download optimized image</a>
-      {% else %}
-        <div class="panel__media panel__media--placeholder">
-          <div class="placeholder">
-            <p class="placeholder__title">Your optimized image appears here</p>
-            <p class="placeholder__text">Choose a file and adjust the options to begin.</p>
+    <!-- ===================== BATCH MODE ===================== -->
+    <div id="mode-batch" class="mode-panel" hidden>
+      <form id="batch-form" enctype="multipart/form-data">
+        <div id="batch-dropzone" class="dropzone" tabindex="0"
+             aria-label="Add images for batch optimization">
+          <input id="batch-input" type="file" name="images" multiple aria-label="Choose image files for batch"
+                 accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden />
+          <div class="dropzone__inner">
+            <svg class="dropzone__icon" viewBox="0 0 24 24" width="48" height="48" aria-hidden="true">
+              <path fill="currentColor" d="M19 13v6H5v-6H3v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6h-2zM11 3v9.17l-2.59-2.58L7 11l5 5 5-5-1.41-1.41L13 12.17V3h-2z"/>
+            </svg>
+            <p class="dropzone__title">Drag &amp; drop up to {{ defaults.batch_max_files }} images</p>
+            <p class="dropzone__hint">or <button type="button" id="batch-browse-btn" class="link-btn">browse files</button></p>
+            <p class="dropzone__formats">JPEG &middot; PNG &middot; WebP &nbsp;|&nbsp; max 25&nbsp;MB each &middot; downloaded as one ZIP</p>
           </div>
         </div>
-      {% endif %}
-    </section>
+        <p id="batch-error" class="client-error" hidden></p>
 
-    <!-- Quality curve data, computed server-side during /upload (no re-upload) -->
-    {% if image %}
-    <script type="application/json" id="curve-data">{{ {'curve': image.curve, 'format': image.format} | tojson }}</script>
+        <section id="batch-controls" class="controls" hidden>
+          <div class="batch-files">
+            <div class="batch-files__head">
+              <p class="controls__name"><span id="batch-count">0</span> file(s) selected</p>
+              <button type="button" id="batch-clear-btn" class="link-btn">Clear all</button>
+            </div>
+            <ul id="batch-list" class="batch-files__list"></ul>
+          </div>
 
-    <dl class="meta meta--before" id="before-meta">
-      <dt>Name</dt><dd>{{ image.filename }}</dd><dt>Format</dt><dd>{{ image.format }}</dd><dt>Dimensions</dt><dd>{{ image.width }} &times; {{ image.height }} px</dd><dt>Size</dt><dd>{{ image.size_human }}</dd>
-    </dl>
-    {% endif %}
+          {{ options_controls(defaults) }}
 
-    <p class="reset-row" {% if not image %}hidden{% endif %} id="reset-row">
-      <a class="link-btn" href="{{ url_for('index') }}">Optimize another image</a>
-    </p>
+          <p class="param-summary js-summary"></p>
+          <button type="submit" id="batch-optimize-btn" class="btn-primary">Optimize batch &amp; download ZIP</button>
+        </section>
+      </form>
+
+      <!-- Batch progress + result -->
+      <section id="batch-progress" class="comparison" hidden>
+        <div class="compare">
+          <h2 class="compare__label">Processing…</h2>
+          <div class="batch-progress__bar"><div id="batch-bar-fill" class="batch-progress__fill"></div></div>
+          <p id="batch-progress-text" class="quality-curve__note">Starting…</p>
+          <ul id="batch-results" class="batch-files__list batch-files__list--results"></ul>
+          <div id="batch-summary" class="savings savings--good" hidden></div>
+          <a id="batch-download" class="btn-download" hidden>Download ZIP</a>
+          <p class="reset-row"><button type="button" id="batch-reset-btn" class="link-btn">Optimize another batch</button></p>
+        </div>
+      </section>
+    </div>
   </main>
 
   <footer class="footer">
-    <p>Rate limited to 30 requests/min &middot; processed in memory, no files retained</p>
+    <p>Rate limited &middot; processed in memory, no files retained</p>
   </footer>
 
   <script src="{{ url_for('static', filename='js/upload.js') }}"></script>

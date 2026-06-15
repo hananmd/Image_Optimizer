@@ -2,3 +2,4 @@ Flask>=3.0
 Flask-Limiter>=3.8
 Pillow>=11.3
 opencv-python-headless>=4.12
+numpy>=2.1
