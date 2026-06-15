@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Image Optimizer</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <header class="masthead">
+      <h1>Single Image Optimizer</h1>
+      <p class="subtitle">Drag &amp; drop a JPEG, PNG, or WebP, tune the options, then optimize. Max 25&nbsp;MB &middot; no retention.</p>
+    </header>
+
+    {% with messages = get_flashed_messages() %}
+      {%- if messages -%}
+        <div class="flash" role="alert">
+          <ul>{%- for message in messages -%}<li>{{ message }}</li>{%- endfor -%}</ul>
+        </div>
+      {%- endif -%}
+    {% endwith %}
+
+    <!-- Upload + options form -->
+    <form id="upload-form" action="{{ url_for('upload') }}" method="post"
+          enctype="multipart/form-data" {% if image %}hidden{% endif %}>
+      <div id="dropzone" class="dropzone" tabindex="0"
+           aria-label="Upload an image by dragging it here or pressing Enter to browse">
+        <input id="file-input" type="file" name="image"
+               accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden />
+        <div class="dropzone__inner">
+          <svg class="dropzone__icon" viewBox="0 0 24 24" width="48" height="48" aria-hidden="true">
+            <path fill="currentColor" d="M19 13v6H5v-6H3v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6h-2zM11 3v9.17l-2.59-2.58L7 11l5 5 5-5-1.41-1.41L13 12.17V3h-2z"/>
+          </svg>
+          <p class="dropzone__title">Drag &amp; drop your image here</p>
+          <p class="dropzone__hint">or <button type="button" id="browse-btn" class="link-btn">browse files</button></p>
+          <p class="dropzone__formats">JPEG &middot; PNG &middot; WebP &nbsp;|&nbsp; SVG &amp; GIF rejected</p>
+        </div>
+      </div>
+      <p id="client-error" class="client-error" hidden></p>
+
+      <!-- Options panel: revealed once a file is chosen -->
+      <section id="controls" class="controls" hidden>
+        <div class="controls__preview">
+          <img id="local-preview" alt="Selected image preview" />
+          <div class="controls__file">
+            <p id="local-name" class="controls__name">—</p>
+            <p id="local-meta" class="controls__metaline">—</p>
+            <button type="button" id="clear-btn" class="link-btn">Choose a different file</button>
+          </div>
+        </div>
+
+        <div class="controls__grid">
+          <fieldset class="ctl ctl--preset">
+            <legend>Preset</legend>
+            <div class="segmented" role="radiogroup" aria-label="Speed vs quality preset">
+              {% for p in defaults.presets %}
+                <label class="seg">
+                  <input type="radio" name="preset" value="{{ p }}"
+                         {% if p == defaults.default_preset %}checked{% endif %} />
+                  <span>{{ p.replace('_', ' ') }}</span>
+                </label>
+              {% endfor %}
+            </div>
+            <p class="ctl__hint" id="preset-hint"></p>
+          </fieldset>
+
+          <div class="ctl">
+            <label for="quality">Quality <span class="ctl__val" id="quality-val">{{ defaults.quality_default }}</span></label>
+            <input type="range" id="quality" name="quality"
+                   min="{{ defaults.quality_min }}" max="{{ defaults.quality_max }}"
+                   value="{{ defaults.quality_default }}" />
+            <p class="ctl__hint">JPEG / WebP only — ignored for PNG (lossless).</p>
+          </div>
+
+          <div class="ctl">
+            <label for="resize_pct">Resize <span class="ctl__val" id="resize-val">{{ defaults.resize_default }}%</span></label>
+            <input type="range" id="resize_pct" name="resize_pct"
+                   min="{{ defaults.resize_min }}" max="{{ defaults.resize_max }}"
+                   value="{{ defaults.resize_default }}" />
+            <p class="ctl__hint" id="resize-hint">Aspect ratio preserved.</p>
+          </div>
+
+          <div class="ctl ctl--toggles">
+            <label class="switch">
+              <input type="checkbox" id="strip_metadata" name="strip_metadata" checked />
+              <span>Strip metadata</span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" id="auto_orient" name="auto_orient" checked />
+              <span>Auto-orient (EXIF)</span>
+            </label>
+          </div>
+        </div>
+
+        <p class="param-summary" id="param-summary"></p>
+        <button type="submit" id="optimize-btn" class="btn-primary">Optimize image</button>
+      </section>
+    </form>
+
+    <!-- Before / After comparison -->
+    <section class="panels" {% if not image %}hidden{% endif %} id="panels">
+      <div class="panel">
+        <h2 class="panel__label">Before <span class="tag">original</span></h2>
+        <div class="panel__media">
+          {% if image %}<img src="{{ image.before_uri }}" alt="Original image" />{% endif %}
+        </div>
+        {% if image %}
+          <dl class="meta"><dt>Name</dt><dd>{{ image.filename }}</dd><dt>Format</dt><dd>{{ image.format }}</dd><dt>Dimensions</dt><dd>{{ image.width }} &times; {{ image.height }} px</dd><dt>Size</dt><dd>{{ image.size_human }}</dd></dl>
+        {% endif %}
+      </div>
+
+      <div class="panel panel--after">
+        <h2 class="panel__label">After
+          {% if image %}<span class="tag tag--done">optimized</span>{% else %}<span class="tag tag--plan">result</span>{% endif %}
+        </h2>
+        {% if image %}
+          <div class="panel__media">
+            <img src="{{ image.optimized.after_uri }}" alt="Optimized image" />
+          </div>
+          {% if image.optimized.smaller %}
+            <p class="savings savings--good">↓ {{ image.optimized.saved_pct }}% smaller
+              <span>saved {{ image.optimized.saved_human }}</span></p>
+          {% else %}
+            <p class="savings savings--none">No size reduction with these settings</p>
+          {% endif %}
+          <dl class="meta"><dt>Format</dt><dd>{{ image.optimized.format }}</dd><dt>Dimensions</dt><dd>{{ image.optimized.width }} &times; {{ image.optimized.height }} px</dd><dt>Size</dt><dd>{{ image.optimized.size_human }}</dd></dl>
+          <dl class="meta meta--opts">
+            <dt>Preset</dt><dd>{{ image.options.preset.replace('_', ' ') }}</dd>
+            <dt>Quality</dt><dd>{{ image.options.effective_quality }}{% if image.options.quality_adjusted %} <span class="note">(adjusted by preset)</span>{% endif %}</dd>
+            <dt>Resize</dt><dd>{{ image.options.resize_pct }}%</dd>
+            <dt>Metadata</dt><dd>{{ 'stripped' if image.options.strip_metadata else 'kept' }}</dd>
+            <dt>Auto-orient</dt><dd>{{ 'on' if image.options.auto_orient else 'off' }}</dd>
+          </dl>
+          <a class="btn-download" href="{{ image.optimized.after_uri }}"
+             download="{{ image.optimized.download_name }}">Download optimized image</a>
+        {% else %}
+          <div class="panel__media panel__media--placeholder">
+            <div class="placeholder">
+              <p class="placeholder__title">Your optimized image appears here</p>
+              <p class="placeholder__text">Choose a file and adjust the options to begin.</p>
+            </div>
+          </div>
+        {% endif %}
+      </div>
+    </section>
+
+    <p class="reset-row" {% if not image %}hidden{% endif %} id="reset-row">
+      <a class="link-btn" href="{{ url_for('index') }}">Optimize another image</a>
+    </p>
+  </main>
+
+  <footer class="footer">
+    <p>Rate limited to 30 requests/min &middot; processed in memory, no files retained</p>
+  </footer>
+
+  <script src="{{ url_for('static', filename='js/upload.js') }}"></script>
+</body>
+</html>
