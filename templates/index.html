@@ -98,52 +98,65 @@
       </section>
     </form>
 
-    <!-- Before / After comparison -->
-    <section class="panels" {% if not image %}hidden{% endif %} id="panels">
-      <div class="panel">
-        <h2 class="panel__label">Before <span class="tag">original</span></h2>
-        <div class="panel__media">
-          {% if image %}<img src="{{ image.before_uri }}" alt="Original image" />{% endif %}
+    <!-- Compare slider + Quality curve chart -->
+    <section class="comparison" {% if not image %}hidden{% endif %} id="comparison">
+      <div class="compare">
+        <h2 class="compare__label">Drag to compare</h2>
+        <div class="compare__wrapper" id="compare-wrapper">
+          <div class="compare__layer compare__layer--before">
+            {% if image %}<img src="{{ image.before_uri }}" alt="Original image" />{% endif %}
+          </div>
+          <div class="compare__layer compare__layer--after">
+            {% if image %}<img src="{{ image.optimized.after_uri }}" alt="Optimized image" />{% endif %}
+          </div>
+          <div class="compare__handle" id="compare-handle" role="slider" aria-label="Compare before/after" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" tabindex="0">
+            <svg class="compare__icon" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6-6-6z"/></svg>
+          </div>
         </div>
-        {% if image %}
-          <dl class="meta"><dt>Name</dt><dd>{{ image.filename }}</dd><dt>Format</dt><dd>{{ image.format }}</dd><dt>Dimensions</dt><dd>{{ image.width }} &times; {{ image.height }} px</dd><dt>Size</dt><dd>{{ image.size_human }}</dd></dl>
-        {% endif %}
+        <div class="compare__legend">
+          <span class="compare__tag compare__tag--before">Before</span>
+          <span class="compare__tag compare__tag--after">After</span>
+        </div>
       </div>
 
-      <div class="panel panel--after">
-        <h2 class="panel__label">After
-          {% if image %}<span class="tag tag--done">optimized</span>{% else %}<span class="tag tag--plan">result</span>{% endif %}
-        </h2>
-        {% if image %}
-          <div class="panel__media">
-            <img src="{{ image.optimized.after_uri }}" alt="Optimized image" />
+      {% if image %}
+        <div class="savings savings--good">↓ {{ image.optimized.saved_pct }}% smaller
+          <span>saved {{ image.optimized.saved_human }}</span></div>
+
+        <section class="quality-curve" id="quality-curve-section">
+          <h3 class="quality-curve__title">Quality vs File Size</h3>
+          <canvas id="quality-curve-chart" class="quality-curve__canvas" width="400" height="200" aria-label="Line chart showing file size at different quality levels"></canvas>
+          <p class="quality-curve__note" id="quality-curve-note">Generating chart…</p>
+        </section>
+
+        <dl class="meta"><dt>Format</dt><dd>{{ image.optimized.format }}</dd><dt>Dimensions</dt><dd>{{ image.optimized.width }} &times; {{ image.optimized.height }} px</dd><dt>Size</dt><dd>{{ image.optimized.size_human }}</dd></dl>
+        <dl class="meta meta--opts">
+          <dt>Preset</dt><dd>{{ image.options.preset.replace('_', ' ') }}</dd>
+          <dt>Quality</dt><dd>{{ image.options.effective_quality }}{% if image.options.quality_adjusted %} <span class="note">(adjusted by preset)</span>{% endif %}</dd>
+          <dt>Resize</dt><dd>{{ image.options.resize_pct }}%</dd>
+          <dt>Metadata</dt><dd>{{ 'stripped' if image.options.strip_metadata else 'kept' }}</dd>
+          <dt>Auto-orient</dt><dd>{{ 'on' if image.options.auto_orient else 'off' }}</dd>
+        </dl>
+        <a class="btn-download" href="{{ image.optimized.after_uri }}"
+           download="{{ image.optimized.download_name }}">Download optimized image</a>
+      {% else %}
+        <div class="panel__media panel__media--placeholder">
+          <div class="placeholder">
+            <p class="placeholder__title">Your optimized image appears here</p>
+            <p class="placeholder__text">Choose a file and adjust the options to begin.</p>
           </div>
-          {% if image.optimized.smaller %}
-            <p class="savings savings--good">↓ {{ image.optimized.saved_pct }}% smaller
-              <span>saved {{ image.optimized.saved_human }}</span></p>
-          {% else %}
-            <p class="savings savings--none">No size reduction with these settings</p>
-          {% endif %}
-          <dl class="meta"><dt>Format</dt><dd>{{ image.optimized.format }}</dd><dt>Dimensions</dt><dd>{{ image.optimized.width }} &times; {{ image.optimized.height }} px</dd><dt>Size</dt><dd>{{ image.optimized.size_human }}</dd></dl>
-          <dl class="meta meta--opts">
-            <dt>Preset</dt><dd>{{ image.options.preset.replace('_', ' ') }}</dd>
-            <dt>Quality</dt><dd>{{ image.options.effective_quality }}{% if image.options.quality_adjusted %} <span class="note">(adjusted by preset)</span>{% endif %}</dd>
-            <dt>Resize</dt><dd>{{ image.options.resize_pct }}%</dd>
-            <dt>Metadata</dt><dd>{{ 'stripped' if image.options.strip_metadata else 'kept' }}</dd>
-            <dt>Auto-orient</dt><dd>{{ 'on' if image.options.auto_orient else 'off' }}</dd>
-          </dl>
-          <a class="btn-download" href="{{ image.optimized.after_uri }}"
-             download="{{ image.optimized.download_name }}">Download optimized image</a>
-        {% else %}
-          <div class="panel__media panel__media--placeholder">
-            <div class="placeholder">
-              <p class="placeholder__title">Your optimized image appears here</p>
-              <p class="placeholder__text">Choose a file and adjust the options to begin.</p>
-            </div>
-          </div>
-        {% endif %}
-      </div>
+        </div>
+      {% endif %}
     </section>
+
+    <!-- Quality curve data, computed server-side during /upload (no re-upload) -->
+    {% if image %}
+    <script type="application/json" id="curve-data">{{ {'curve': image.curve, 'format': image.format} | tojson }}</script>
+
+    <dl class="meta meta--before" id="before-meta">
+      <dt>Name</dt><dd>{{ image.filename }}</dd><dt>Format</dt><dd>{{ image.format }}</dd><dt>Dimensions</dt><dd>{{ image.width }} &times; {{ image.height }} px</dd><dt>Size</dt><dd>{{ image.size_human }}</dd>
+    </dl>
+    {% endif %}
 
     <p class="reset-row" {% if not image %}hidden{% endif %} id="reset-row">
       <a class="link-btn" href="{{ url_for('index') }}">Optimize another image</a>

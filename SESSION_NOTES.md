@@ -104,6 +104,104 @@ python app.py
 - After data URI present; **0 files** left in temp dir (no retention).
 - GIF rejected with 400.
 
+## Session 2 — Drag-to-compare slider + Quality curve chart
+
+Added two client-side visual features without changing the optimization kernel.
+
+### 1. Drag-to-compare slider (replaces side-by-side panels)
+
+- **Before/After** images are stacked with a draggable vertical handle.
+- The "after" image uses `clip-path: inset()` to reveal only the portion to the
+  right of the handle; the "before" image fills the container beneath.
+- Drag via mouse or touch; keyboard arrow keys, Home/End, and Shift+arrow for
+  finer steps.
+- HiDPI-aware; handle icon is an inline SVG chevron.
+
+### 2. Quality vs file-size curve chart
+
+- A **new `/quality_curve` endpoint** runs silent optimization passes at quality
+  levels 10, 20, 30, …, 90 (plus the current effective quality) and returns the
+  file size at each point.
+- For PNG, returns a single point (lossless — quality has no effect).
+- Canvas line chart with a dark theme, grid lines, axis labels, and HiDPI
+  support.
+- On the result page, the original image is embedded as a **`data-before-uri`**
+  attribute on a hidden `<div>`; JavaScript converts it back to a `File` (via
+  `atob` + `Uint8Array`) and POSTs it to `/quality_curve` to generate the chart
+  automatically.
+
+### 3. Project structure (updated)
+
+```text
+IMAGETOOLS/
+├── app.py                  # + quality_curve_bytes(), /quality_curve route
+├── templates/
+│   └── index.html          # compare slider + quality curve canvas + result-payload
+├── static/
+│   ├── css/style.css       # .compare*, .quality-curve* styles
+│   └── js/upload.js        # initCompareSlider, fetchAndRenderQualityCurve,
+│                           # renderQualityCurve, autoFetchQualityCurve
+```
+
+### Key locations (new/changed)
+
+- Quality curve endpoint + generator: `quality_curve_bytes()` in app.py — 9
+  silent passes, sorted with current effective quality inserted.
+- Compare slider JS: `initCompareSlider()` in upload.js — pointer events,
+  touch, keyboard, resize handling.
+- Canvas chart: `renderQualityCurve()` in upload.js — dark grid, line + points,
+  PNG single-point fallback.
+- Result page auto-fetch: `autoFetchQualityCurve()` in upload.js — reads the
+  `data-before-uri` attribute from `#result-payload`, converts to File, POSTs
+  to `/quality_curve`.
+
+### Trade-offs / notes
+
+- The `data-before-uri` attribute can be very large (up to ~33 MB for a 25 MB
+  upload). HTML attribute length limits are not a concern in modern browsers,
+  but the page source weight is doubled (once for the `<img>` tag, once for the
+  hidden attribute). Acceptable for this demo.
+- The quality curve fetch counts toward the 30 req/min rate limit.
+- The old `.panels` grid and `.panel` styles are retained (unused) to avoid
+  breaking any existing references; the placeholder still uses `.panel__media`.
+
+## Session 3 — Optimization + bug fix pass
+
+Reviewed the Session-2 additions for correctness and efficiency.
+
+### Bug fixed — compare slider showed nothing
+
+- Both `.compare__layer` elements were `position: absolute; inset: 0`, so the
+  `.compare__wrapper` collapsed to **0 height** and neither image rendered.
+- Fix: the **before** layer is now in normal flow (`position: relative`) to give
+  the wrapper its height; the **after** layer overlays absolutely and is revealed
+  via `clip-path`. Images capped at `max-height: 70vh`.
+
+### Optimization — quality curve no longer re-uploads the image
+
+- **Before:** the result page converted the embedded `data-before-uri` (up to
+  ~33 MB) back into a `File` and POSTed it to a second `/quality_curve` endpoint,
+  which **re-decoded and re-resized the image 9 times**. The huge URI was also
+  duplicated in the HTML (`<img>` + `data-before-uri`), and the extra request
+  counted against the 30 req/min limit.
+- **After:** the curve is computed **inline during `/upload`** and embedded as a
+  small JSON `<script id="curve-data">`. Removed: the `/quality_curve` route,
+  `quality_curve_bytes()`, the `data-before-uri` attribute / `#result-payload`,
+  and the JS `fetchAndRenderQualityCurve` / `dataURIToFile` / `autoFetchQualityCurve`.
+- **Single decode:** new `_prepare_image()` (decode → auto-orient → resize →
+  mode-normalize) + `_encode()` (format-specific save) are shared by
+  `optimize_bytes()` and `optimize_with_curve()`. The curve now re-encodes the
+  already-prepared image at each quality (decode/resize happen **once**, not 10×),
+  and the encode at the effective quality is reused as the optimized result.
+- Chart now redraws on window resize (debounced) so the canvas stays crisp.
+
+### Net effect
+
+- Result page = **1 request** (was 2); no multi-MB re-upload; ~9× fewer
+  decode/resize operations for the curve; smaller HTML (one copy of each image).
+- Still in-memory / no retention; verified 0 files on disk and `/quality_curve`
+  now returns 404.
+
 ## Possible next steps / open trade-offs
 
 - Data URIs make a 25 MB upload produce a heavy (~33 MB) HTML response. If
@@ -112,3 +210,5 @@ python app.py
 - OpenCV is imported but unused — reserved for future features (denoise, smart
   resize, etc.).
 - PNG metadata preservation is limited to EXIF where supported.
+- The quality curve chart could be extended to show the current quality point
+  highlighted on the curve.

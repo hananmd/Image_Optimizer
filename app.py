@@ -157,82 +157,117 @@ def effective_quality(quality: int, preset: str) -> int:
 # Optimization pipeline (in-memory)
 # --------------------------------------------------------------------------- #
 
-def optimize_bytes(raw: bytes, fmt: str, opts: dict) -> dict:
-    """Process raw image bytes and return optimized bytes + metadata.
+# Quality levels sampled for the "quality vs file size" chart.
+QUALITY_CURVE_STEPS = (10, 20, 30, 40, 50, 60, 70, 80, 90)
 
-    Pipeline: auto-orient (optional) -> resize (optional) -> encode with
-    preset/quality/strip options. Everything happens in memory.
+
+def _prepare_image(raw: bytes, fmt: str, opts: dict):
+    """Decode -> auto-orient -> resize -> mode-normalize. Returns (image, exif).
+
+    The expensive work (decode/orient/resize) happens here once so both the
+    single optimize pass and the quality-curve sweep can reuse the same image.
     """
+    img = Image.open(BytesIO(raw))
+    img.load()
+
+    if opts["auto_orient"]:
+        img = ImageOps.exif_transpose(img)
+
+    # Capture EXIF before resizing (resize does not carry the info dict over).
+    # exif_transpose already normalized orientation, so re-attaching is safe.
+    exif = None if opts["strip_metadata"] else img.info.get("exif")
+
+    if opts["resize_pct"] != 100:
+        factor = opts["resize_pct"] / 100.0
+        new_size = (
+            max(1, round(img.width * factor)),
+            max(1, round(img.height * factor)),
+        )
+        img = img.resize(new_size, Image.LANCZOS)
+
+    if fmt == "JPEG":
+        # JPEG has no alpha; flatten transparency onto white.
+        if img.mode in ("RGBA", "LA", "P"):
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            rgba = img.convert("RGBA")
+            bg.paste(rgba, mask=rgba.split()[-1])
+            img = bg
+        else:
+            img = img.convert("RGB")
+
+    return img, exif
+
+
+def _encode(img, fmt: str, quality: int, preset: str, exif) -> bytes:
+    """Encode an already-prepared image to bytes for the given format."""
+    buf = BytesIO()
+    if fmt == "JPEG":
+        params = dict(
+            format="JPEG",
+            quality=quality,
+            optimize=preset != "speed",
+            progressive=preset != "speed",
+            subsampling=PRESET_JPEG_SUBSAMPLING[preset],
+        )
+        if exif:
+            params["exif"] = exif
+        img.save(buf, **params)
+    elif fmt == "WEBP":
+        params = dict(format="WEBP", quality=quality, method=PRESET_WEBP_METHOD[preset])
+        if exif:
+            params["exif"] = exif
+        img.save(buf, **params)
+    elif fmt == "PNG":
+        # PNG is lossless: quality is ignored; the preset controls zlib effort.
+        img.save(buf, format="PNG", optimize=True, compress_level=PRESET_PNG_LEVEL[preset])
+    else:  # pragma: no cover - validation prevents other formats
+        raise ValueError(f"Unsupported format: {fmt}")
+    return buf.getvalue()
+
+
+def optimize_bytes(raw: bytes, fmt: str, opts: dict) -> dict:
+    """Optimize raw image bytes -> optimized bytes + metadata (in memory)."""
     quality = effective_quality(opts["quality"], opts["preset"])
-
-    with Image.open(BytesIO(raw)) as src:
-        src.load()
-
-        if opts["auto_orient"]:
-            src = ImageOps.exif_transpose(src)
-
-        # Resize by percent, preserving aspect ratio (same factor on both axes).
-        if opts["resize_pct"] != 100:
-            factor = opts["resize_pct"] / 100.0
-            new_size = (
-                max(1, round(src.width * factor)),
-                max(1, round(src.height * factor)),
-            )
-            src = src.resize(new_size, Image.LANCZOS)
-
-        out_w, out_h = src.size
-        # Preserve EXIF only when not stripping. exif_transpose already
-        # normalized the orientation tag, so re-attaching won't double-rotate.
-        exif = None if opts["strip_metadata"] else src.info.get("exif")
-
-        buf = BytesIO()
-        if fmt == "JPEG":
-            if src.mode in ("RGBA", "LA", "P"):
-                bg = Image.new("RGB", src.size, (255, 255, 255))
-                rgba = src.convert("RGBA")
-                bg.paste(rgba, mask=rgba.split()[-1])
-                src = bg
-            else:
-                src = src.convert("RGB")
-            params = dict(
-                format="JPEG",
-                quality=quality,
-                optimize=opts["preset"] != "speed",
-                progressive=opts["preset"] != "speed",
-                subsampling=PRESET_JPEG_SUBSAMPLING[opts["preset"]],
-            )
-            if exif:
-                params["exif"] = exif
-            src.save(buf, **params)
-        elif fmt == "WEBP":
-            params = dict(
-                format="WEBP",
-                quality=quality,
-                method=PRESET_WEBP_METHOD[opts["preset"]],
-            )
-            if exif:
-                params["exif"] = exif
-            src.save(buf, **params)
-        elif fmt == "PNG":
-            # PNG is lossless: the quality slider does not apply; the preset
-            # controls zlib effort instead.
-            src.save(
-                buf,
-                format="PNG",
-                optimize=True,
-                compress_level=PRESET_PNG_LEVEL[opts["preset"]],
-            )
-        else:  # pragma: no cover - validation prevents other formats
-            raise ValueError(f"Unsupported format: {fmt}")
-
-    data = buf.getvalue()
+    img, exif = _prepare_image(raw, fmt, opts)
+    data = _encode(img, fmt, quality, opts["preset"], exif)
     return {
         "bytes": data,
-        "width": out_w,
-        "height": out_h,
+        "width": img.width,
+        "height": img.height,
         "size_bytes": len(data),
         "effective_quality": quality,
     }
+
+
+def optimize_with_curve(raw: bytes, fmt: str, opts: dict) -> tuple[dict, list[dict]]:
+    """Optimize the image and build its quality-vs-size curve in one decode.
+
+    Decodes/orients/resizes once, then re-encodes at each sampled quality. The
+    encode at the effective quality is reused as the optimized result. PNG is
+    lossless, so its curve is a single point.
+    """
+    preset = opts["preset"]
+    eff_q = effective_quality(opts["quality"], preset)
+    img, exif = _prepare_image(raw, fmt, opts)
+
+    opt_bytes = _encode(img, fmt, eff_q, preset, exif)
+    result = {
+        "bytes": opt_bytes,
+        "width": img.width,
+        "height": img.height,
+        "size_bytes": len(opt_bytes),
+        "effective_quality": eff_q,
+    }
+
+    if fmt == "PNG":
+        curve = [{"quality": 100, "size_bytes": len(opt_bytes)}]
+    else:
+        curve = []
+        for q in sorted(set(QUALITY_CURVE_STEPS) | {eff_q}):
+            size = len(opt_bytes) if q == eff_q else len(_encode(img, fmt, q, preset, exif))
+            curve.append({"quality": q, "size_bytes": size})
+
+    return result, curve
 
 
 def to_data_uri(raw: bytes, fmt: str) -> str:
@@ -306,7 +341,8 @@ def upload():
         orig_w, orig_h = img.size
 
     try:
-        result = optimize_bytes(raw, fmt, opts)
+        # One decode pass produces both the optimized image and the curve.
+        result, curve = optimize_with_curve(raw, fmt, opts)
     except (OSError, ValueError) as exc:
         return _upload_error(f"Could not optimize image: {exc}", wants_json)
 
@@ -324,6 +360,7 @@ def upload():
         "size_bytes": orig_size,
         "size_human": _human_size(orig_size),
         "before_uri": to_data_uri(raw, fmt),
+        "curve": curve,
         "optimized": {
             "format": fmt,
             "width": result["width"],
@@ -344,8 +381,8 @@ def upload():
     }
 
     if wants_json:
-        # Omit the heavy data URIs from JSON by default to keep payloads sane.
-        slim = {k: v for k, v in image.items() if k not in ("before_uri",)}
+        # Omit the heavy before data URI from JSON to keep payloads sane.
+        slim = {k: v for k, v in image.items() if k != "before_uri"}
         return jsonify({"ok": True, "image": slim})
 
     return render_template("index.html", image=image, defaults=_ui_defaults())

@@ -29,6 +29,15 @@
   var paramSummary = document.getElementById("param-summary");
   var optimizeBtn = document.getElementById("optimize-btn");
 
+  // Compare slider elements
+  var compareWrapper = document.getElementById("compare-wrapper");
+  var compareHandle = document.getElementById("compare-handle");
+  var compareAfterLayer = document.querySelector(".compare__layer--after");
+
+  // Quality curve elements
+  var qualityCurveCanvas = document.getElementById("quality-curve-chart");
+  var qualityCurveNote = document.getElementById("quality-curve-note");
+
   if (!form || !dropzone || !fileInput) return;
 
   // Soft preset bounds — must mirror the server (PRESET_QUALITY_CAP in app.py).
@@ -218,5 +227,229 @@
     }
   });
 
+  // --- Compare slider ---
+  function initCompareSlider() {
+    if (!compareWrapper || !compareHandle || !compareAfterLayer) return;
+
+    var isDragging = false;
+    var wrapperRect = null;
+
+    function updateHandlePosition(clientX) {
+      if (!wrapperRect) return;
+      var x = clientX - wrapperRect.left;
+      var pct = Math.max(0, Math.min(100, (x / wrapperRect.width) * 100));
+      compareHandle.style.left = pct + "%";
+      compareAfterLayer.style.clipPath = "inset(0 0 0 " + pct + "%)";
+      compareHandle.setAttribute("aria-valuenow", Math.round(pct));
+    }
+
+    function onPointerDown(e) {
+      isDragging = true;
+      wrapperRect = compareWrapper.getBoundingClientRect();
+      compareHandle.style.transition = "none";
+      updateHandlePosition(e.clientX || (e.touches && e.touches[0].clientX));
+      e.preventDefault();
+    }
+
+    function onPointerMove(e) {
+      if (!isDragging) return;
+      var clientX = e.clientX || (e.touches && e.touches[0].clientX);
+      if (clientX != null) updateHandlePosition(clientX);
+    }
+
+    function onPointerUp() {
+      if (!isDragging) return;
+      isDragging = false;
+      compareHandle.style.transition = "left 0.05s linear";
+      wrapperRect = null;
+    }
+
+    compareHandle.addEventListener("mousedown", onPointerDown);
+    compareHandle.addEventListener("touchstart", onPointerDown, { passive: false });
+    window.addEventListener("mousemove", onPointerMove);
+    window.addEventListener("touchmove", onPointerMove, { passive: false });
+    window.addEventListener("mouseup", onPointerUp);
+    window.addEventListener("touchend", onPointerUp);
+
+    // Keyboard support
+    compareHandle.addEventListener("keydown", function (e) {
+      var step = e.shiftKey ? 10 : 1;
+      var current = parseInt(compareHandle.style.left || "50", 10);
+      var newPos = current;
+      if (e.key === "ArrowRight" || e.key === "ArrowUp") newPos = Math.min(100, current + step);
+      else if (e.key === "ArrowLeft" || e.key === "ArrowDown") newPos = Math.max(0, current - step);
+      else if (e.key === "Home") newPos = 0;
+      else if (e.key === "End") newPos = 100;
+      else return;
+      e.preventDefault();
+      compareHandle.style.left = newPos + "%";
+      compareAfterLayer.style.clipPath = "inset(0 0 0 " + newPos + "%)";
+      compareHandle.setAttribute("aria-valuenow", newPos);
+    });
+
+    // Handle window resize
+    window.addEventListener("resize", function () {
+      wrapperRect = compareWrapper.getBoundingClientRect();
+    });
+  }
+
+  // --- Quality curve chart (data embedded server-side; no re-upload) ---
+  var lastCurve = null;
+  var lastFmt = null;
+
+  function renderQualityCurve(curve, fmt) {
+    lastCurve = curve;
+    lastFmt = fmt;
+    var ctx = qualityCurveCanvas.getContext("2d");
+    if (!ctx) return;
+
+    var dpr = window.devicePixelRatio || 1;
+    var cssWidth = qualityCurveCanvas.clientWidth || 400;
+    var cssHeight = qualityCurveCanvas.clientHeight || 200;
+    qualityCurveCanvas.width = cssWidth * dpr;
+    qualityCurveCanvas.height = cssHeight * dpr;
+    ctx.scale(dpr, dpr);
+
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+    var padding = { top: 20, right: 10, bottom: 30, left: 50 };
+    var plotW = cssWidth - padding.left - padding.right;
+    var plotH = cssHeight - padding.top - padding.bottom;
+
+    // Find min/max
+    var sizes = curve.map(function (p) { return p.size_bytes; });
+    var minSize = Math.min.apply(null, sizes);
+    var maxSize = Math.max.apply(null, sizes);
+    var qualities = curve.map(function (p) { return p.quality; });
+    var minQ = Math.min.apply(null, qualities);
+    var maxQ = Math.max.apply(null, qualities);
+
+    // Handle single point (PNG)
+    if (curve.length === 1) {
+      minSize = maxSize = curve[0].size_bytes;
+      minQ = maxQ = curve[0].quality;
+    }
+
+    var sizeRange = maxSize - minSize || 1;
+    var qRange = maxQ - minQ || 1;
+
+    // Grid lines
+    ctx.strokeStyle = "#2e3946";
+    ctx.lineWidth = 1;
+    ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.fillStyle = "#8b97a6";
+
+    // Horizontal grid (4 lines)
+    for (var i = 0; i <= 4; i++) {
+      var y = padding.top + (plotH / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(padding.left, y);
+      ctx.lineTo(padding.left + plotW, y);
+      ctx.stroke();
+
+      var val = maxSize - (sizeRange / 4) * i;
+      ctx.fillText(humanSize(val), 4, y + 3);
+    }
+
+    // Vertical grid (5 lines)
+    for (var j = 0; j <= 5; j++) {
+      var x = padding.left + (plotW / 5) * j;
+      ctx.beginPath();
+      ctx.moveTo(x, padding.top);
+      ctx.lineTo(x, padding.top + plotH);
+      ctx.stroke();
+
+      var q = minQ + (qRange / 5) * j;
+      ctx.fillText(Math.round(q), x - 10, cssHeight - 6);
+    }
+
+    // Axes
+    ctx.strokeStyle = "#4a5565";
+    ctx.beginPath();
+    ctx.moveTo(padding.left, padding.top);
+    ctx.lineTo(padding.left, padding.top + plotH);
+    ctx.lineTo(padding.left + plotW, padding.top + plotH);
+    ctx.stroke();
+
+    // Axis labels
+    ctx.fillStyle = "#8b97a6";
+    ctx.font = "12px -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Quality", padding.left + plotW / 2, cssHeight - 2);
+    ctx.save();
+    ctx.translate(10, padding.top + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("File Size", 0, 0);
+    ctx.restore();
+
+    // Draw curve
+    if (curve.length > 1) {
+      ctx.strokeStyle = "#4f9cff";
+      ctx.lineWidth = 2;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+
+      curve.forEach(function (point, idx) {
+        var x = padding.left + ((point.quality - minQ) / qRange) * plotW;
+        var y = padding.top + plotH - ((point.size_bytes - minSize) / sizeRange) * plotH;
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // Draw points
+      ctx.fillStyle = "#4f9cff";
+      curve.forEach(function (point) {
+        var x = padding.left + ((point.quality - minQ) / qRange) * plotW;
+        var y = padding.top + plotH - ((point.size_bytes - minSize) / sizeRange) * plotH;
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    } else {
+      // Single point for PNG
+      var x = padding.left + plotW / 2;
+      var y = padding.top + plotH / 2;
+      ctx.fillStyle = "#4f9cff";
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#e6edf3";
+      ctx.font = "bold 13px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("PNG (lossless)", x, y - 15);
+      ctx.font = "11px sans-serif";
+      ctx.fillStyle = "#8b97a6";
+      ctx.fillText(humanSize(curve[0].size_bytes), x, y + 5);
+    }
+
+    qualityCurveNote.textContent = fmt === "PNG" ? "PNG is lossless — quality slider has no effect." : "Hover the slider to see file size at different quality levels.";
+  }
+
+  // --- Render quality curve from server-embedded JSON (no second request) ---
+  function renderEmbeddedCurve() {
+    var el = document.getElementById("curve-data");
+    if (!el || !qualityCurveCanvas) return;
+    var data;
+    try { data = JSON.parse(el.textContent); } catch (e) { return; }
+    if (!data.curve || !data.curve.length) {
+      if (qualityCurveNote) qualityCurveNote.textContent = "Could not generate chart.";
+      return;
+    }
+    renderQualityCurve(data.curve, data.format);
+  }
+
+  // Redraw the chart on resize so the canvas stays crisp at the new width.
+  var resizeTimer = null;
+  window.addEventListener("resize", function () {
+    if (!lastCurve) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () { renderQualityCurve(lastCurve, lastFmt); }, 150);
+  });
+
+  // Init
+  initCompareSlider();
+  renderEmbeddedCurve();
   refreshUI();
 })();
