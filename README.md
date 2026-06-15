@@ -1,6 +1,8 @@
+<div align="center">
+
 # 🖼️ Image Optimizer
 
-## A fast, honest, in-memory image optimizer for the web — single shots or batch ZIPs
+### A fast, honest, in-memory image optimizer for the web — single shots or batch ZIPs
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Flask](https://img.shields.io/badge/Flask-3.x-000000?logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
@@ -12,6 +14,8 @@ Compress **JPEG · PNG · WebP** with quality, resize, noise reduction, and an
 SSIM-driven *auto-quality* mode — with a live before/after compare slider and a
 quality-vs-filesize chart. Everything runs **in memory**; nothing is written to
 disk.
+
+</div>
 
 ---
 
@@ -33,7 +37,7 @@ disk.
 
 ```bash
 # 1. Clone
-git clone <YOUR_REPO_URL>        # ← replace with your repo URL
+git clone https://github.com/hananmd/Image_Optimizer.git        # ← replace with your repo URL
 cd IMAGETOOLS
 
 # 2. Create & activate a virtual environment
@@ -183,4 +187,8 @@ IMAGETOOLS/
 
 Released under the **MIT License** — see [LICENSE](LICENSE) for details.
 
+<div align="center">
+
 ⭐ If you find this useful, consider starring the repo!
+
+</div>
